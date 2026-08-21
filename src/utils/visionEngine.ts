@@ -200,6 +200,8 @@ let distractedSince: number | null = null;
 // Rolling array of yawn onset timestamps (Murree Protocol).
 let yawnTimestamps: number[] = [];
 
+let mouthWasOpen = false;
+
 // Luminance tracking state.
 let smoothedLuminance = LUMINANCE_TARGET;
 let exposureCompensation = 0;
@@ -298,6 +300,7 @@ export function resetCalibration(): void {
   lowEarSince = null;
   distractedSince = null;
   yawnTimestamps = [];
+  mouthWasOpen = false;
   smoothedLuminance = LUMINANCE_TARGET;
   exposureCompensation = 0;
   useSafetyStore.getState().setCalibrated(false);
@@ -687,12 +690,13 @@ export async function processFrame(frame: FrameInput): Promise<FrameResult> {
   // ── Yawning — Murree Protocol (rolling window) ─────────────────────────────
   let yawning = false;
 
-  // Detect yawn onset (rising edge: previous frame below threshold, this one above)
   const yawnThreshold = Math.max(MAR_YAWN_THRESHOLD, baseline.marMean + 0.15);
-  if (mar > yawnThreshold) {
+  const mouthOpen = mar > yawnThreshold;
+  if (mouthOpen && !mouthWasOpen) {
     yawning = true;
     yawnTimestamps.push(now);
   }
+  mouthWasOpen = mouthOpen;
 
   // Prune timestamps outside the 60-second rolling window
   yawnTimestamps = yawnTimestamps.filter((t) => now - t < YAWN_WINDOW_MS);

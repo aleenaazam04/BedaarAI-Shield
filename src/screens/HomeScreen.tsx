@@ -197,6 +197,18 @@ export default function HomeScreen() {
     try { releaseSiren?.(); } catch { /* swallow */ }
   }, []);
 
+  // ── Drowsiness alarm — beep while eyes are closed ────────────────────────
+  useEffect(() => {
+    if (isCrashDetected) return;
+    if (isDrowsy) {
+      try { playSiren?.(); } catch (err) {
+        console.warn('[HomeScreen] drowsy alarm failed:', err);
+      }
+    } else {
+      try { stopSiren?.(); } catch { /* swallow */ }
+    }
+  }, [isDrowsy, isCrashDetected]);
+
   // ── Face detection callback (JS thread, called from SafeCamera bridge) ──
   const handleFacesDetected = useCallback(
     (faces: Face[]) => {

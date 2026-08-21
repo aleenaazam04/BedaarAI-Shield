@@ -6,6 +6,7 @@ jest.mock('react-native-vision-camera', () => ({
   useCameraDevice: () => ({ id: 'mock-front', position: 'front' }),
   useCameraPermission: () => ({ hasPermission: true, requestPermission: jest.fn() }),
   useFrameProcessor: (fn) => fn,
+  useCameraFormat: () => undefined,
 }));
 
 jest.mock('react-native-vision-camera-face-detector', () => ({
@@ -35,6 +36,19 @@ jest.mock('react-native-sensors', () => {
 
 jest.mock('@react-native-community/geolocation', () => ({
   getCurrentPosition: jest.fn(),
+}));
+
+jest.mock('react-native-tts', () => ({
+  __esModule: true,
+  default: {
+    setDefaultLanguage: jest.fn(),
+    setDefaultRate: jest.fn(),
+    speak: jest.fn(),
+    stop: jest.fn(),
+    getInitStatus: jest.fn(() => Promise.resolve()),
+    addEventListener: jest.fn(),
+    removeAllListeners: jest.fn(),
+  },
 }));
 
 jest.mock('@react-native-async-storage/async-storage', () =>
