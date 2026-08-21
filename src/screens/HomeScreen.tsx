@@ -100,6 +100,8 @@ const BLOOD_GROUPS = [
 /** Impact threshold in G-force units. Normal driving ~ 0.5–1.5 G. */
 const CRASH_G_THRESHOLD = 3.0;
 
+const GRAVITY_MS2 = 9.81;
+
 /** Sensor sampling interval in ms (10 Hz). */
 const ACCEL_UPDATE_INTERVAL_MS = 100;
 
@@ -252,7 +254,7 @@ export default function HomeScreen() {
         if (Date.now() < crashCooldownRef.current) return;
         if (useSafetyStore.getState().isCrashDetected) return;
 
-        const gForce = Math.sqrt(x * x + y * y + z * z);
+        const gForce = Math.sqrt(x * x + y * y + z * z) / GRAVITY_MS2;
         if (gForce > CRASH_G_THRESHOLD) {
           useSafetyStore.getState().setCrashDetected(true);
         }
@@ -280,7 +282,7 @@ export default function HomeScreen() {
         const state = useSafetyStore.getState();
         state.decrementCountdown();
 
-        if (state.countdownTimer <= 0) {
+        if (useSafetyStore.getState().countdownTimer <= 0) {
           if (countdownRef.current) clearInterval(countdownRef.current);
           countdownRef.current = null;
           setShowEmergency(false);
