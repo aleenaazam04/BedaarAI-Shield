@@ -87,7 +87,7 @@ function LanguageSelectionModal({
       <View style={styles.langRoot}>
         {/* Decorative header bar */}
         <View style={styles.langHeader}>
-          <Text style={styles.langIcon}>🌐</Text>
+          <Text style={styles.langIcon}></Text>
         </View>
 
         <Text style={styles.langTitle}>

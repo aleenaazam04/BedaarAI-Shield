@@ -28,6 +28,7 @@
 import React, { useMemo } from 'react';
 import {
   Camera as VisionCamera,
+  useCameraFormat,
   useFrameProcessor,
   type CameraProps,
   type Frame,
@@ -38,6 +39,7 @@ import {
   type FrameFaceDetectionOptions,
 } from 'react-native-vision-camera-face-detector';
 import { Worklets } from 'react-native-worklets-core';
+import { useSharedValue } from 'react-native-reanimated';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -46,6 +48,9 @@ import { Worklets } from 'react-native-worklets-core';
 interface SafeCameraProps extends Omit<CameraProps, 'frameProcessor' | 'pixelFormat'> {
   /** Face detection configuration options. */
   faceDetectionOptions?: FrameFaceDetectionOptions;
+
+  /** Optional custom format filters. Defaults to a low-power, older-device friendly profile. */
+  cameraFormatFilters?: any[];
 
   /**
    * Called on the JS thread whenever faces are detected in a frame.
@@ -60,7 +65,7 @@ interface SafeCameraProps extends Omit<CameraProps, 'frameProcessor' | 'pixelFor
 
 const SafeCamera = React.forwardRef<VisionCamera, SafeCameraProps>(
   (
-    { faceDetectionOptions, onFacesDetected, ...cameraProps },
+    { faceDetectionOptions, onFacesDetected, format: providedFormat, cameraFormatFilters, ...cameraProps },
     ref,
   ) => {
     // Initialize the ML Kit face detector plugin (safe — no Skia import).
@@ -92,6 +97,20 @@ const SafeCamera = React.forwardRef<VisionCamera, SafeCameraProps>(
       [onFacesDetected],
     );
 
+    const formatFilters = useMemo<any[]>(
+      () =>
+        cameraFormatFilters ?? [
+          { fps: 30 },
+          { videoResolution: { width: 1280, height: 720 } },
+          { videoResolution: 'max' },
+        ],
+      [cameraFormatFilters],
+    );
+
+    const adaptiveFormat = useCameraFormat(cameraProps.device, formatFilters as any);
+    const resolvedFormat = providedFormat ?? adaptiveFormat;
+    const lastProcessedAt = useSharedValue(0);
+
     // Frame processor — runs on the Vision Camera worklet thread.
     // detectFaces() is a native worklet call (ML Kit).
     // Results are bridged back to JS via runOnJs.
@@ -105,6 +124,10 @@ const SafeCamera = React.forwardRef<VisionCamera, SafeCameraProps>(
       (frame: Frame) => {
         'worklet';
         try {
+          const processingTimestamp = Date.now();
+          if (processingTimestamp - lastProcessedAt.value < 120) return;
+          lastProcessedAt.value = processingTimestamp;
+
           const faces = (detectFaces as any)(frame) as Face[];
           const internal = frame as any;
           // Keep the frame alive until the JS callback processes it.
@@ -117,7 +140,7 @@ const SafeCamera = React.forwardRef<VisionCamera, SafeCameraProps>(
           // Silently skip frames where detection fails.
         }
       },
-      [detectFaces, runOnJs],
+      [detectFaces, runOnJs, lastProcessedAt],
     );
 
     return (
@@ -125,6 +148,7 @@ const SafeCamera = React.forwardRef<VisionCamera, SafeCameraProps>(
         ref={ref}
         frameProcessor={frameProcessor}
         pixelFormat="yuv"
+        format={resolvedFormat}
         {...cameraProps}
       />
     );

@@ -5,19 +5,18 @@
  * for the driver safety app with built-in trigger guards.
  */
 
-import { Linking, Platform } from 'react-native';
+import { Linking, Platform, PermissionsAndroid, Vibration } from 'react-native';
 import Geolocation from '@react-native-community/geolocation';
 import { useSafetyStore } from '../store/useSafetyStore';
 import { logIncident } from '../services/storageService';
+import { requestAudioFocus, abandonAudioFocus } from './audioService';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants & Safety Flags
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SIREN_RESOURCE = 'siren';
-const RAW_BASE_URL = 'raw/';
-
-let isProtocolExecuting = false; // Guard against multiple triggers
+const SIREN_RESOURCE = 'siren.mp3';
+let isProtocolExecuting = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lazy Sound Loader & Instances
@@ -28,6 +27,18 @@ let soundLoadAttempted = false;
 let sirenSound: any = null;
 let soundInitialised = false;
 let soundLoadFailed = false;
+let vibrationFallbackActive = false;
+let sirenRequested = false;
+
+function startVibrationFallback(): void {
+  if (vibrationFallbackActive) return;
+  vibrationFallbackActive = true;
+  try {
+    Vibration.vibrate([500, 500], true);
+  } catch {
+    // Vibration is optional and must never break emergency handling.
+  }
+}
 
 function getSoundClass(): any {
   if (SoundClass) return SoundClass;
@@ -72,11 +83,11 @@ function ensureSiren(): any {
   ensureSoundCategory();
 
   try {
-    sirenSound = new Sound(SIREN_RESOURCE, RAW_BASE_URL, (error: any) => {
+    sirenSound = new Sound(SIREN_RESOURCE, Sound.MAIN_BUNDLE, (error: any) => {
       if (error) {
-        console.warn('[EmergencyService] Failed to load siren.mp3:', error?.message ?? error);
         sirenSound = null;
         soundLoadFailed = true;
+        if (sirenRequested) startVibrationFallback();
       }
     });
   } catch (err) {
@@ -93,12 +104,26 @@ function ensureSiren(): any {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function playSiren(): void {
-  if (soundLoadFailed) return;
+  if (sirenRequested || vibrationFallbackActive) return;
+  sirenRequested = true;
+
+  if (soundLoadFailed) {
+    startVibrationFallback();
+    return;
+  }
 
   const sound = ensureSiren();
-  if (!sound) return;
+  if (!sound) {
+    startVibrationFallback();
+    return;
+  }
 
   try {
+    if (typeof sound.isLoaded !== 'function' || !sound.isLoaded()) {
+      startVibrationFallback();
+      return;
+    }
+
     sound.setVolume?.(1.0);
 
     if (Platform.OS === 'android') {
@@ -108,20 +133,25 @@ export function playSiren(): void {
     sound.setNumberOfLoops?.(-1);
 
     sound.play?.((success: boolean) => {
-      if (!success) {
-        console.warn('[EmergencyService] Siren playback failed.');
-      }
+      if (!success) startVibrationFallback();
     });
   } catch (err) {
-    console.warn('[EmergencyService] playSiren error:', err);
+    startVibrationFallback();
   }
 }
 
 export function stopSiren(): void {
+  sirenRequested = false;
   try {
+    if (vibrationFallbackActive) {
+      Vibration.cancel();
+      vibrationFallbackActive = false;
+    }
     if (sirenSound) {
       sirenSound.stop?.();
       sirenSound.setCurrentTime?.(0);
+      sirenSound.release?.();
+      sirenSound = null;
     }
   } catch (err) {
     console.warn('[EmergencyService] stopSiren error:', err);
@@ -129,8 +159,14 @@ export function stopSiren(): void {
 }
 
 export function releaseSiren(): void {
+  sirenRequested = false;
   try {
+    if (vibrationFallbackActive) {
+      Vibration.cancel();
+      vibrationFallbackActive = false;
+    }
     if (sirenSound) {
+      sirenSound.stop?.();
       sirenSound.release?.();
       sirenSound = null;
     }
@@ -172,16 +208,27 @@ async function getGoogleMapsUrl(): Promise<string | null> {
 
 export async function dialEmergency(): Promise<void> {
   const profile = useSafetyStore.getState().driverProfile;
-  const guardianPhone = profile?.guardianPhone ?? 'NOT_SET';
+  const emergencyNumber = '1122';
+  const phoneNumber = `tel:${emergencyNumber}`;
 
-  console.warn(`[EmergencyService] 🚨 SIMULATION — target phone: ${guardianPhone}`);
+  requestAudioFocus('alarm');
 
   try {
+    const supported = await Linking.canOpenURL(phoneNumber);
+    if (supported) {
+      await Linking.openURL(phoneNumber);
+      console.warn(`[EmergencyService] Direct call dispatched to ${emergencyNumber}`);
+    } else {
+      console.warn('[EmergencyService] Direct call is not supported on this device.');
+    }
+
     await logIncident('impact', {
-      reason: `Simulated emergency dispatch — guardian: ${guardianPhone}`,
+      reason: `Emergency call dispatched to ${emergencyNumber} for crash event`,
     });
   } catch (err) {
-    console.warn('[EmergencyService] Failed to log simulated dispatch:', err);
+    console.warn('[EmergencyService] Failed to dispatch emergency call:', err);
+  } finally {
+    setTimeout(() => abandonAudioFocus(), 1500);
   }
 }
 
@@ -193,7 +240,17 @@ export async function sendEmergencySMS(): Promise<void> {
     return;
   }
 
-  const driverName = profile.driverName || 'Unknown driver';
+  if (Platform.OS === 'android') {
+    const granted = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.SEND_SMS,
+    );
+    if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
+      console.warn('[EmergencyService] SMS permission denied');
+      return;
+    }
+  }
+
+  const driverName = profile.driverName || 'Driver';
   const bloodGroup = profile.bloodGroup || 'N/A';
 
   const mapsUrl = await getGoogleMapsUrl();
@@ -219,6 +276,11 @@ export async function sendEmergencySMS(): Promise<void> {
     } else {
       console.warn('[EmergencyService] SMS composer not available on this device.');
     }
+
+    await logIncident('impact', {
+      reason: `Guardian SMS sent to ${profile.guardianPhone}`,
+      location: mapsUrl ?? undefined,
+    });
   } catch (err) {
     console.warn('[EmergencyService] sendEmergencySMS error:', err);
   }
@@ -250,7 +312,6 @@ export async function executeEmergencyProtocol(): Promise<void> {
   } catch (err) {
     console.warn('[EmergencyService] Protocol execution failed:', err);
   } finally {
-    // FIX: Turn off crash state & reset countdown so screen closes!
     useSafetyStore.getState().setCrashDetected(false);
     useSafetyStore.getState().resetCountdown();
 

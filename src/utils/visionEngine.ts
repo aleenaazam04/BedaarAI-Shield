@@ -7,8 +7,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  *  Module          │  Trigger condition
  * ─────────────────────────────────────────────────────────────────────────────
- *  Auto-Calibrate  │  90 frames (3 s) averaged baseline
- *  Fatigue (EAR)   │  EAR < 0.2 for 60 consecutive frames (2 s)  → DROWSY
+ *  Auto-Calibrate  │  30 analyzed frames (3 s at 10 fps) averaged baseline
+ *  Fatigue (EAR)   │  EAR < 0.2 for 2.8 s continuously  → DROWSY
  *  Murree  (MAR)   │  MAR > 0.6 more than 3× in 60 s           → OXYGEN DEFICIENCY
  *  Gaze / Head     │  Pitch or Yaw > ±30° from baseline         → DISTRACTION
  *  Night Vision    │  Luminance tracking + auto exposure compensation
@@ -56,6 +56,9 @@ export interface FrameInput {
 
   /** Timestamp of the frame; defaults to `Date.now()` if omitted. */
   timestamp?: number;
+
+  /** Explicitly indicates whether a face was present in this frame. */
+  isFaceDetected?: boolean;
 
   // ── Direct metrics from react-native-vision-camera-face-detector ─────────
   // When provided, these take precedence over landmark-based calculations.
@@ -108,7 +111,7 @@ export interface FrameResult {
   /** Suggested exposure compensation in EV (–2 … +2). */
   exposureCompensation: number;
 
-  /** True when the driver's eyes have been closed for > 2 s continuously. */
+  /** True when the driver's eyes have been closed for the continuous threshold. */
   drowsy: boolean;
 
   /** True on the exact frame a yawning mouth was first detected. */
@@ -127,17 +130,18 @@ export type AlertType = 'drowsy' | 'oxygen_deficiency' | 'distraction';
 // Thresholds & Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/** Auto-calibration window — 3 s at 30 fps. */
-const CALIBRATION_FRAME_TARGET = 90;
+/** Auto-calibration window — 3 s at the throttled 10 fps analysis rate. */
+const CALIBRATION_FRAME_TARGET = 30;
 
 /** Fixed EAR threshold below which eyes are considered closed. */
 const EAR_THRESHOLD = 0.2;
 
 /**
  * Consecutive low-EAR frames required before triggering DROWSY.
- * 60 frames ≈ 2 s at 30 fps — eliminates normal blinks (~150–250 ms).
+ * The time-based guard eliminates normal blinks (~150–250 ms) regardless of
+ * the camera's native frame rate.
  */
-const DROWSY_CONTINUOUS_FRAMES = 60;
+const DROWSY_CONTINUOUS_MS = 2800;
 
 /** MAR threshold above which the mouth is classified as open / yawning. */
 const MAR_YAWN_THRESHOLD = 0.6;
@@ -149,7 +153,8 @@ const YAWN_ALERT_COUNT = 3;
 const YAWN_WINDOW_MS = 60_000;
 
 /** Pitch or yaw deviation (degrees) from baseline that counts as distraction. */
-const DISTRACTION_ANGLE_DEG = 30;
+const DISTRACTION_ANGLE_DEG = 45;
+const DISTRACTION_CONTINUOUS_MS = 3000;
 
 /** Exponential-moving-average weight for luminance smoothing. */
 const LUMINANCE_EMA_ALPHA = 0.1;
@@ -189,6 +194,8 @@ let baseline: Baseline = { earMean: 0, marMean: 0, pitchNeutral: 0, yawNeutral: 
 
 // Rolling counter for consecutive low-EAR frames (drowsiness).
 let consecutiveLowEarFrames = 0;
+let lowEarSince: number | null = null;
+let distractedSince: number | null = null;
 
 // Rolling array of yawn onset timestamps (Murree Protocol).
 let yawnTimestamps: number[] = [];
@@ -288,6 +295,8 @@ export function resetCalibration(): void {
     frameCount: 0,
   });
   consecutiveLowEarFrames = 0;
+  lowEarSince = null;
+  distractedSince = null;
   yawnTimestamps = [];
   smoothedLuminance = LUMINANCE_TARGET;
   exposureCompensation = 0;
@@ -558,7 +567,7 @@ function clamp01(v: number): number {
  * Process one camera frame end-to-end.
  *
  * Call this from the Vision Camera frame processor worklet on every tick.
- * During the calibration window (first 90 frames) only calibration runs;
+ * During the calibration window (first 30 analyzed frames) only calibration runs;
  * afterwards all detectors are active.
  */
 export async function processFrame(frame: FrameInput): Promise<FrameResult> {
@@ -571,17 +580,52 @@ export async function processFrame(frame: FrameInput): Promise<FrameResult> {
   // over geometric landmark calculations when available.
   const hasDirectEyeData =
     frame.leftEyeOpenProbability != null && frame.rightEyeOpenProbability != null;
-  const ear = hasDirectEyeData
+  const rawEar = hasDirectEyeData
     ? (frame.leftEyeOpenProbability! + frame.rightEyeOpenProbability!) / 2.0
     : computeEAR(landmarks);
 
-  const mar = frame.mouthOpenProbability != null
+  const rawMar = frame.mouthOpenProbability != null
     ? frame.mouthOpenProbability
     : computeMAR(landmarks);
 
   const hasDirectPose = frame.directPitch != null && frame.directYaw != null;
   const pitch = hasDirectPose ? frame.directPitch! : estimateHeadPose(landmarks).pitch;
   const yaw = hasDirectPose ? frame.directYaw! : estimateHeadPose(landmarks).yaw;
+  const isFaceDetected = frame.isFaceDetected ?? (hasDirectEyeData || landmarks.length > 0);
+
+  if (!isFaceDetected) {
+    consecutiveLowEarFrames = 0;
+    lowEarSince = null;
+    distractedSince = null;
+    useSafetyStore.getState().setDrowsy(false);
+    useSafetyStore.getState().setYawning(false);
+    useSafetyStore.getState().setDistracted(false);
+    return {
+      calibrated: calibrationComplete,
+      calibrationProgress: Math.min(
+        calibrationAccumulator.frameCount / CALIBRATION_FRAME_TARGET,
+        1,
+      ),
+      ear: 0,
+      mar: 0,
+      pitch: 0,
+      yaw: 0,
+      luminance: smoothedLuminance,
+      exposureCompensation,
+      drowsy: false,
+      yawning: false,
+      distracted: false,
+      alerts,
+    };
+  }
+
+  // Compensate modestly for foreshortening while the driver turns or tilts.
+  // This keeps normal all-angle movement from looking like closed eyes or an
+  // exaggerated mouth without allowing a missing face to enter the detector.
+  const poseMagnitude = Math.min(90, Math.abs(yaw) + Math.abs(pitch));
+  const orientationFactor = 1 + (poseMagnitude / 90) * 0.2;
+  const ear = rawEar * orientationFactor;
+  const mar = rawMar / orientationFactor;
 
   // ── Calibration gate ───────────────────────────────────────────────────────
   if (!calibrationComplete) {
@@ -610,20 +654,31 @@ export async function processFrame(frame: FrameInput): Promise<FrameResult> {
   // In night mode, relax the EAR threshold slightly because low-light cameras
   // produce noisier landmark data and eyes may appear partially squinted.
   const nightEarAdjustment = nightResult.isNightMode ? -0.03 : 0;
-  const effectiveEarThreshold = EAR_THRESHOLD + nightEarAdjustment;
+  // Calibrated open-eye EAR is commonly around 0.735-0.957. Keep the relative
+  // value available for calibration safety, but never raise the verified
+  // drowsiness trigger above the strict EAR < 0.2 requirement.
+  const calibratedEarThreshold = baseline.earMean > 0
+    ? baseline.earMean * 0.5
+    : EAR_THRESHOLD;
+  const effectiveEarThreshold = Math.min(
+    EAR_THRESHOLD,
+    calibratedEarThreshold + nightEarAdjustment,
+  );
   let drowsy = false;
 
-  if (ear < effectiveEarThreshold) {
+  if (ear > 0.05 && ear < effectiveEarThreshold) {
     consecutiveLowEarFrames += 1;
+    lowEarSince ??= now;
   } else {
     consecutiveLowEarFrames = 0;
+    lowEarSince = null;
   }
 
-  if (consecutiveLowEarFrames >= DROWSY_CONTINUOUS_FRAMES) {
+  if (lowEarSince != null && now - lowEarSince >= DROWSY_CONTINUOUS_MS) {
     drowsy = true;
     alerts.push('drowsy');
     await logIncident('drowsiness', {
-      reason: `EAR=${ear.toFixed(3)} below threshold ${effectiveEarThreshold.toFixed(3)} for ${DROWSY_CONTINUOUS_FRAMES} frames (2s rule)`,
+      reason: `EAR=${ear.toFixed(3)} below threshold ${effectiveEarThreshold.toFixed(3)} for ${DROWSY_CONTINUOUS_MS}ms`,
     });
   }
 
@@ -658,12 +713,20 @@ export async function processFrame(frame: FrameInput): Promise<FrameResult> {
   // ── Distraction (pitch / yaw deviation from baseline) ──────────────────────
   const pitchDelta = Math.abs(pitch - baseline.pitchNeutral);
   const yawDelta = Math.abs(yaw - baseline.yawNeutral);
-  const distracted = pitchDelta > DISTRACTION_ANGLE_DEG || yawDelta > DISTRACTION_ANGLE_DEG;
+  const pitchThreshold = DISTRACTION_ANGLE_DEG;
+  const yawThreshold = DISTRACTION_ANGLE_DEG;
+  const outsidePoseLimits = pitchDelta > pitchThreshold || yawDelta > yawThreshold;
+  if (outsidePoseLimits) {
+    distractedSince ??= now;
+  } else {
+    distractedSince = null;
+  }
+  const distracted = distractedSince != null && now - distractedSince >= DISTRACTION_CONTINUOUS_MS;
 
   if (distracted) {
     alerts.push('distraction');
     await logIncident('distraction', {
-      reason: `Head tilt pitch=${pitch.toFixed(1)}° yaw=${yaw.toFixed(1)}° exceeds ±${DISTRACTION_ANGLE_DEG}° from baseline (pitch=${baseline.pitchNeutral.toFixed(1)}° yaw=${baseline.yawNeutral.toFixed(1)}°)`,
+      reason: `Head tilt pitch=${pitch.toFixed(1)}° yaw=${yaw.toFixed(1)}° exceeded calibrated limits for ${DISTRACTION_CONTINUOUS_MS}ms`,
     });
   }
 
