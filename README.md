@@ -1,79 +1,101 @@
-This is a new [**React Native**](https://reactnative.dev) project, bootstrapped using [`@react-native-community/cli`](https://github.com/react-native-community/cli).
+# Bedaar AI Shield
 
-# Getting Started
+**Bedaar** (بیدار — "awake / alert") is an on-device **driver safety** app for React Native. Using the front camera, ML Kit face detection, and the phone's accelerometer, it watches for drowsiness, yawning, distraction, and crashes — then escalates to an emergency protocol that alerts a guardian with the driver's live location.
 
->**Note**: Make sure you have completed the [React Native - Environment Setup](https://reactnative.dev/docs/environment-setup) instructions till "Creating a new application" step, before proceeding.
+Everything runs **locally on the device**. No frames or personal data leave the phone.
 
-## Step 1: Start the Metro Server
+---
 
-First, you will need to start **Metro**, the JavaScript _bundler_ that ships _with_ React Native.
+## Features
 
-To start Metro, run the following command from the _root_ of your React Native project:
+| Module | What it does | Trigger |
+| --- | --- | --- |
+| **Fatigue (EAR)** | Eye Aspect Ratio from eye-open probability | Eyes closed for ~2s → **DROWSY** |
+| **Murree Protocol (MAR)** | Mouth Aspect Ratio / yawning frequency | >3 yawns in 60s → **oxygen-deficiency** alert |
+| **Distraction** | Head pitch / yaw vs. calibrated baseline | Deviation > ±30° → **DISTRACTED** |
+| **Night Vision** | Luminance smoothing + auto exposure compensation | Low light → **NIGHT MODE** |
+| **Crash Detection** | Accelerometer G-force impact | > 3.0 G → emergency countdown |
+| **Emergency Protocol** | 10s "I AM OK" countdown → siren + SMS/call to guardian with a Google Maps location link | Countdown expires |
+
+Additional:
+- **Auto-calibration** — averages a baseline over the first ~90 frames (3s).
+- **Driver profile** — name, blood group, guardian phone (11-digit) persisted to AsyncStorage.
+- **Black-box log** — append-only incident log stored on device.
+- **Bilingual** — English + Urdu (RTL-aware), language persisted across launches.
+
+---
+
+## Tech stack
+
+- **React Native 0.75.5** + TypeScript
+- **react-native-vision-camera** + **vision-camera-face-detector** (ML Kit) with a custom Skia-free `SafeCamera` wrapper
+- **react-native-worklets-core** / **react-native-reanimated** for frame processing and UI animation
+- **react-native-sensors** (accelerometer), **@react-native-community/geolocation** (GPS)
+- **zustand** for state (`useSafetyStore`, `useI18nStore`)
+- **react-native-sound** (siren)
+
+---
+
+## Project structure
+
+```
+App.tsx                         Root: error boundary, language gate, splash
+index.js                        Entry point + global error handler
+src/
+  components/Camera.tsx         SafeCamera — forwardRef VisionCamera wrapper (no Skia)
+  screens/HomeScreen.tsx        Dashboard: camera, metrics, hazards, emergency modal
+  utils/visionEngine.ts         EAR / MAR / head-pose / night-vision engine
+  services/emergencyService.ts  Siren + call + SMS + location
+  services/storageService.ts    Driver profile + black-box incident log
+  store/useSafetyStore.ts       Real-time safety state
+  store/useI18nStore.ts         English / Urdu translations
+__tests__/App.test.tsx          Render smoke test
+```
+
+---
+
+## Getting started
+
+> Complete the [React Native environment setup](https://reactnative.dev/docs/environment-setup) first (Android SDK / Xcode).
 
 ```bash
-# using npm
+# 1. Install dependencies
+npm install
+
+# 2. iOS only — install pods
+cd ios && pod install && cd ..
+
+# 3. Start Metro
 npm start
 
-# OR using Yarn
-yarn start
-```
-
-## Step 2: Start your Application
-
-Let Metro Bundler run in its _own_ terminal. Open a _new_ terminal from the _root_ of your React Native project. Run the following command to start your _Android_ or _iOS_ app:
-
-### For Android
-
-```bash
-# using npm
+# 4. In a second terminal, build & run
 npm run android
-
-# OR using Yarn
-yarn android
-```
-
-### For iOS
-
-```bash
-# using npm
+# or
 npm run ios
-
-# OR using Yarn
-yarn ios
 ```
 
-If everything is set up _correctly_, you should see your new app running in your _Android Emulator_ or _iOS Simulator_ shortly provided you have set up your emulator/simulator correctly.
+The app requests **camera**, **location**, and (for the emergency protocol) **SMS/phone** permissions. On first launch you'll pick a language and complete the driver-profile onboarding.
 
-This is one way to run your app — you can also run it directly from within Android Studio and Xcode respectively.
+### Testing the crash flow
+Use the **Test Crash** button on the dashboard to trigger the emergency countdown without an actual impact.
 
-## Step 3: Modifying your App
+---
 
-Now that you have successfully run the app, let's modify it.
+## Scripts
 
-1. Open `App.tsx` in your text editor of choice and edit some lines.
-2. For **Android**: Press the <kbd>R</kbd> key twice or select **"Reload"** from the **Developer Menu** (<kbd>Ctrl</kbd> + <kbd>M</kbd> (on Window and Linux) or <kbd>Cmd ⌘</kbd> + <kbd>M</kbd> (on macOS)) to see your changes!
+| Command | Description |
+| --- | --- |
+| `npm start` | Start the Metro bundler |
+| `npm run android` | Build & launch on Android |
+| `npm run ios` | Build & launch on iOS |
+| `npm test` | Run the Jest test suite |
+| `npm run lint` | Run ESLint |
 
-   For **iOS**: Hit <kbd>Cmd ⌘</kbd> + <kbd>R</kbd> in your iOS Simulator to reload the app and see your changes!
+Type-check with `npx tsc --noEmit`.
 
-## Congratulations! :tada:
+---
 
-You've successfully run and modified your React Native App. :partying_face:
+## Notes
 
-### Now what?
-
-- If you want to add this new React Native code to an existing application, check out the [Integration guide](https://reactnative.dev/docs/integration-with-existing-apps).
-- If you're curious to learn more about React Native, check out the [Introduction to React Native](https://reactnative.dev/docs/getting-started).
-
-# Troubleshooting
-
-If you can't get this to work, see the [Troubleshooting](https://reactnative.dev/docs/troubleshooting) page.
-
-# Learn More
-
-To learn more about React Native, take a look at the following resources:
-
-- [React Native Website](https://reactnative.dev) - learn more about React Native.
-- [Getting Started](https://reactnative.dev/docs/environment-setup) - an **overview** of React Native and how setup your environment.
-- [Learn the Basics](https://reactnative.dev/docs/getting-started) - a **guided tour** of the React Native **basics**.
-- [Blog](https://reactnative.dev/blog) - read the latest official React Native **Blog** posts.
-- [`@facebook/react-native`](https://github.com/facebook/react-native) - the Open Source; GitHub **repository** for React Native.
+- `emergencyService.ts`'s `dialEmergency()` currently **logs** the dispatch and `sendEmergencySMS()` opens the SMS composer via `Linking` (it does not auto-send). These are intentionally simulation-friendly; wire up `react-native-sms` / `react-native-immediate-phone-call` for fully automatic dispatch.
+- The siren expects a `siren` audio resource bundled under the platform's raw resources.
