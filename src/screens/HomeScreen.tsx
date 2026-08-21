@@ -19,7 +19,6 @@ import React, {
   useState,
 } from 'react';
 import {
-  AppState,
   Dimensions,
   Modal,
   Pressable,
@@ -98,8 +97,14 @@ const BLOOD_GROUPS = [
 // Accelerometer crash-detection constants (Feature 5)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Impact threshold in G-force units. Lower values are ignored as driving noise. */
-const CRASH_G_THRESHOLD = 6.0;
+/** Impact threshold as a multiple of the resting gravity baseline. */
+const CRASH_RATIO_THRESHOLD = 4.0;
+
+const BASELINE_WARMUP_SAMPLES = 20;
+const BASELINE_EMA_ALPHA = 0.05;
+
+/** Consecutive over-threshold samples required to confirm an impact. */
+const CRASH_CONFIRM_SAMPLES = 2;
 
 /** Sensor sampling interval in ms (10 Hz). */
 const ACCEL_UPDATE_INTERVAL_MS = 100;
@@ -130,31 +135,6 @@ const DEFAULT_METRICS: MetricsSnapshot = {
   calibrated: false,
 };
 
-function estimateFaceMouthAspectRatio(face: Face): number | undefined {
-  const contours = face.contours;
-  if (!contours) {
-    return undefined;
-  }
-
-  const mouthPoints = [
-    ...contours.UPPER_LIP_TOP,
-    ...contours.UPPER_LIP_BOTTOM,
-    ...contours.LOWER_LIP_TOP,
-    ...contours.LOWER_LIP_BOTTOM,
-  ];
-
-  if (mouthPoints.length < 2) {
-    return undefined;
-  }
-
-  const horizontal = Math.max(...mouthPoints.map((point) => point.x)) -
-    Math.min(...mouthPoints.map((point) => point.x));
-  const vertical = Math.max(...mouthPoints.map((point) => point.y)) -
-    Math.min(...mouthPoints.map((point) => point.y));
-
-  return horizontal > 0 ? vertical / (2 * horizontal) : undefined;
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 // Main component
 // ═════════════════════════════════════════════════════════════════════════════
@@ -176,52 +156,22 @@ export default function HomeScreen() {
   const isYawning = useSafetyStore((s: { isYawning: boolean }) => s.isYawning);
   const isDistracted = useSafetyStore((s: { isDistracted: boolean }) => s.isDistracted);
   const isNightMode = useSafetyStore((s: { isNightMode: boolean }) => s.isNightMode);
-  const isCalibrated = useSafetyStore((s: { isCalibrated: boolean }) => s.isCalibrated);
   const isCrashDetected = useSafetyStore((s: { isCrashDetected: boolean }) => s.isCrashDetected);
   const countdownTimer = useSafetyStore((s: { countdownTimer: number }) => s.countdownTimer);
-  const driverProfile = useSafetyStore((s: { driverProfile: DriverProfile | null }) => s.driverProfile);
 
   // ── Local UI state ──────────────────────────────────────────────────────
   const [metrics, setMetrics] = useState<MetricsSnapshot>(DEFAULT_METRICS);
   const [showEmergency, setShowEmergency] = useState(false);
   const [showDrawer, setShowDrawer] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [profileLoaded, setProfileLoaded] = useState(false);
-  const [isAppActive, setIsAppActive] = useState(AppState.currentState === 'active');
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const impactStartRef = useRef<number | null>(null);
-  const processingFrameRef = useRef(false);
-  const emergencyDismissedUntilRef = useRef(0);
-  const isShieldActive = language !== null && profileLoaded && driverProfile !== null && !showOnboarding;
-  const isDashboardActive = isShieldActive && hasPermission === true && device != null;
-  const isSafetyActive = isDashboardActive && isAppActive;
-  const isEmergencyEligible = isSafetyActive && isCalibrated;
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextState) => {
-      setIsAppActive(nextState === 'active');
-    });
-
-    return () => subscription.remove();
-  }, []);
-
-  useEffect(() => {
-    if (!isSafetyActive) {
-      impactStartRef.current = null;
-      useSafetyStore.getState().setCrashDetected(false);
-    }
-  }, [isSafetyActive]);
 
   // ── Permissions ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!isShieldActive) {
-      return;
-    }
-
     if (hasPermission == null || !hasPermission) {
       requestPermission();
     }
-  }, [hasPermission, requestPermission, isShieldActive]);
+  }, [hasPermission, requestPermission]);
 
   // ── Load profile on mount — show onboarding if none exists ─────────────
   useEffect(() => {
@@ -238,8 +188,6 @@ export default function HomeScreen() {
         console.warn('[HomeScreen] Failed to load driver profile:', err);
         // On error, still show onboarding so user can set up profile
         setShowOnboarding(true);
-      } finally {
-        setProfileLoaded(true);
       }
     })();
   }, []);
@@ -252,20 +200,18 @@ export default function HomeScreen() {
   // ── Face detection callback (JS thread, called from SafeCamera bridge) ──
   const handleFacesDetected = useCallback(
     (faces: Face[]) => {
-      if (processingFrameRef.current) return;
-      processingFrameRef.current = true;
+      if (faces.length === 0) return;
       const face = faces[0];
 
       processFrame({
         landmarks: [],
         luminance: 0.5,
         timestamp: Date.now(),
-        isFaceDetected: face != null,
-        leftEyeOpenProbability: face?.leftEyeOpenProbability,
-        rightEyeOpenProbability: face?.rightEyeOpenProbability,
-        mouthOpenProbability: face ? estimateFaceMouthAspectRatio(face) : undefined,
-        directPitch: face?.pitchAngle,
-        directYaw: face?.yawAngle,
+        leftEyeOpenProbability: face.leftEyeOpenProbability,
+        rightEyeOpenProbability: face.rightEyeOpenProbability,
+        mouthOpenProbability: face.smilingProbability,
+        directPitch: face.pitchAngle,
+        directYaw: face.yawAngle,
       }).then((result: FrameResult) => {
         setMetrics({
           ear: result.ear,
@@ -279,8 +225,6 @@ export default function HomeScreen() {
         });
       }).catch((err: unknown) => {
         console.warn('[HomeScreen] processFrame error:', err);
-      }).finally(() => {
-        processingFrameRef.current = false;
       });
     },
     [],
@@ -306,94 +250,57 @@ export default function HomeScreen() {
   const crashCooldownRef = useRef<number>(0);
   const CRASH_COOLDOWN_MS = 5000; // 5-second grace period after cancel
 
-  useEffect(() => {
-    if (isSafetyActive) {
-      resetVisionEngine();
-    }
-  }, [isSafetyActive]);
+  const gravityBaselineRef = useRef<number>(0);
+  const baselineSamplesRef = useRef<number>(0);
+  const spikeStreakRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!isEmergencyEligible) {
-      impactStartRef.current = null;
-      useSafetyStore.getState().setCrashDetected(false);
-      return;
-    }
-
     let sub: Subscription | null = null;
-    const accelerometerAvailable = !!accelerometer && typeof accelerometer.subscribe === 'function';
-
-    if (!accelerometerAvailable) {
-      console.warn('[HomeScreen] Accelerometer unavailable on this device.');
-      return;
-    }
-
     try {
-      if (accelerometerAvailable) {
-        setUpdateIntervalForType('accelerometer', ACCEL_UPDATE_INTERVAL_MS);
-        sub = accelerometer.subscribe(({ x, y, z }: { x: number; y: number; z: number }) => {
-          const now = Date.now();
-          if (now < crashCooldownRef.current || now < emergencyDismissedUntilRef.current) {
-            impactStartRef.current = null;
-            useSafetyStore.getState().setCrashDetected(false);
-            return;
+      setUpdateIntervalForType('accelerometer', ACCEL_UPDATE_INTERVAL_MS);
+      sub = accelerometer.subscribe(({ x, y, z }: { x: number; y: number; z: number }) => {
+        const magnitude = Math.sqrt(x * x + y * y + z * z);
+
+        if (baselineSamplesRef.current < BASELINE_WARMUP_SAMPLES) {
+          gravityBaselineRef.current =
+            baselineSamplesRef.current === 0
+              ? magnitude
+              : (gravityBaselineRef.current + magnitude) / 2;
+          baselineSamplesRef.current += 1;
+          return;
+        }
+
+        if (Date.now() < crashCooldownRef.current) return;
+        if (useSafetyStore.getState().isCrashDetected) return;
+
+        const baseline = gravityBaselineRef.current || magnitude;
+        const ratio = magnitude / baseline;
+
+        if (ratio > CRASH_RATIO_THRESHOLD) {
+          spikeStreakRef.current += 1;
+          if (spikeStreakRef.current >= CRASH_CONFIRM_SAMPLES) {
+            spikeStreakRef.current = 0;
+            useSafetyStore.getState().setCrashDetected(true);
           }
-
-          if (useSafetyStore.getState().isCrashDetected) return;
-
-          const gForce = Math.sqrt(x * x + y * y + z * z);
-          if (gForce > CRASH_G_THRESHOLD) {
-            impactStartRef.current ??= now;
-
-            if (now - impactStartRef.current >= 500) {
-              useSafetyStore.getState().setCrashDetected(true);
-            }
-          } else {
-            impactStartRef.current = null;
-            useSafetyStore.getState().setCrashDetected(false);
-          }
-        });
-      }
+        } else {
+          spikeStreakRef.current = 0;
+          gravityBaselineRef.current =
+            baseline + BASELINE_EMA_ALPHA * (magnitude - baseline);
+        }
+      });
     } catch (err) {
-      console.warn('[HomeScreen] Motion sensors unavailable on this device:', err);
+      console.warn('[HomeScreen] Accelerometer not available:', err);
     }
 
-    return () => {
-      sub?.unsubscribe();
-    };
-  }, [isEmergencyEligible]);
-
-  const drowsyAlertActiveRef = useRef(false);
-  useEffect(() => {
-    if (!isSafetyActive) {
-      drowsyAlertActiveRef.current = false;
-      try { stopSiren?.(); } catch { /* audio cleanup must be harmless */ }
-      return;
-    }
-
-    if (isDrowsy && !drowsyAlertActiveRef.current) {
-      drowsyAlertActiveRef.current = true;
-      try { playSiren?.(); } catch (error) {
-        console.warn('[HomeScreen] Drowsiness siren failed:', error);
-      }
-    } else if (!isDrowsy && drowsyAlertActiveRef.current) {
-      drowsyAlertActiveRef.current = false;
-      try { stopSiren?.(); } catch (error) {
-        console.warn('[HomeScreen] Drowsiness siren stop failed:', error);
-      }
-    }
-  }, [isDrowsy, isSafetyActive]);
+    return () => { if (sub) sub.unsubscribe(); };
+  }, []);
 
   // ═════════════════════════════════════════════════════════════════════════
   // Crash / emergency countdown
   // ═════════════════════════════════════════════════════════════════════════
 
   useEffect(() => {
-    const canOpenEmergency =
-      isEmergencyEligible &&
-      !showEmergency &&
-      Date.now() >= emergencyDismissedUntilRef.current;
-
-    if (canOpenEmergency && isCrashDetected) {
+    if (isCrashDetected) {
       useSafetyStore.getState().resetCountdown();
       setShowEmergency(true);
       try { playSiren?.(); } catch (err) {
@@ -404,7 +311,7 @@ export default function HomeScreen() {
         const state = useSafetyStore.getState();
         state.decrementCountdown();
 
-        if (state.countdownTimer <= 1) {
+        if (useSafetyStore.getState().countdownTimer <= 0) {
           if (countdownRef.current) clearInterval(countdownRef.current);
           countdownRef.current = null;
           setShowEmergency(false);
@@ -417,19 +324,18 @@ export default function HomeScreen() {
           });
         }
       }, 1000);
-    } else if (!isCrashDetected || !isEmergencyEligible) {
+    } else {
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
         countdownRef.current = null;
       }
-      try { stopSiren?.(); } catch { /* audio cleanup must be harmless */ }
       setShowEmergency(false);
     }
 
     return () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [isCrashDetected, isEmergencyEligible, showEmergency]);
+  }, [isCrashDetected]);
 
   const handleIAmOK = useCallback(() => {
     try { stopSiren?.(); } catch { /* swallow */ }
@@ -446,10 +352,7 @@ export default function HomeScreen() {
     store.setDistracted(false);
     store.resetCountdown();
 
-    const dismissedUntil = Date.now() + CRASH_COOLDOWN_MS;
-    crashCooldownRef.current = dismissedUntil;
-    emergencyDismissedUntilRef.current = dismissedUntil;
-    impactStartRef.current = null;
+    crashCooldownRef.current = Date.now() + CRASH_COOLDOWN_MS;
     setShowEmergency(false);
   }, []);
 
@@ -460,24 +363,6 @@ export default function HomeScreen() {
   // ═════════════════════════════════════════════════════════════════════════
   // Render
   // ═════════════════════════════════════════════════════════════════════════
-
-  if (language === null || !profileLoaded) {
-    return <View style={styles.centered} />;
-  }
-
-  if (!isShieldActive) {
-    return (
-      <View style={styles.centered}>
-        {profileLoaded && showOnboarding ? (
-          <OnboardingModal
-            visible
-            onComplete={() => setShowOnboarding(false)}
-            t={t}
-          />
-        ) : null}
-      </View>
-    );
-  }
 
   if (hasPermission == null || !hasPermission) {
     return (
@@ -502,33 +387,21 @@ export default function HomeScreen() {
 
   return (
     <View style={styles.root}>
-      <View pointerEvents="none" style={styles.ambientWash} />
-      <View pointerEvents="none" style={styles.ambientGlow} />
-
       {/* ── Camera preview ── */}
-      <View style={styles.cameraFrame}>
-        <SafeCamera
-          ref={cameraRef}
-          style={StyleSheet.absoluteFill}
-          device={device}
-          isActive={isAppActive && isShieldActive}
-          cameraFormatFilters={[
-            { fps: 30 },
-            { videoResolution: { width: 1280, height: 720 } },
-            { videoResolution: { width: 1920, height: 1080 } },
-            { videoResolution: 'max' },
-          ]}
-          exposure={metrics.calibrated ? (metrics.exposureCompensation + 2) / 4 : 0.5}
-          faceDetectionOptions={{
-            performanceMode: 'fast',
-            landmarkMode: 'all',
-            contourMode: 'none',
-            classificationMode: 'all',
-          }}
-          onFacesDetected={handleFacesDetected}
-        />
-        <View pointerEvents="none" style={styles.cameraEdgeGlow} />
-      </View>
+      <SafeCamera
+        ref={cameraRef}
+        style={StyleSheet.absoluteFill}
+        device={device}
+        isActive
+        exposure={metrics.calibrated ? (metrics.exposureCompensation + 2) / 4 : 0.5}
+        faceDetectionOptions={{
+          performanceMode: 'fast',
+          landmarkMode: 'all',
+          contourMode: 'none',
+          classificationMode: 'all',
+        }}
+        onFacesDetected={handleFacesDetected}
+      />
 
       {/* ── Scrim overlay ── */}
       <View style={styles.scrim} />
@@ -994,6 +867,7 @@ function OnboardingModal({
     >
       <View style={styles.onboardingRoot}>
         <View style={styles.onboardingHeader}>
+          <Text style={styles.onboardingIcon}>{'\uD83D\uDE97'}</Text>
           <Text style={styles.onboardingTitle}>{t('welcomeTitle')}</Text>
           <Text style={styles.onboardingSubtitle}>{t('welcomeSubtitle')}</Text>
         </View>
@@ -1071,37 +945,7 @@ function OnboardingModal({
 // ═════════════════════════════════════════════════════════════════════════════
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0A0F1A' },
-  ambientWash: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#1A1F2E',
-    opacity: 0.42,
-  },
-  ambientGlow: {
-    position: 'absolute',
-    top: -120,
-    left: -80,
-    right: -80,
-    height: 300,
-    backgroundColor: '#123A58',
-    opacity: 0.2,
-    borderRadius: 180,
-  },
-  cameraFrame: {
-    ...StyleSheet.absoluteFillObject,
-    margin: 10,
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: 'rgba(0,212,255,0.38)',
-    backgroundColor: '#060A12',
-  },
-  cameraEdgeGlow: {
-    ...StyleSheet.absoluteFillObject,
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(77,214,255,0.2)',
-  },
+  root: { flex: 1, backgroundColor: C.bg },
   centered: {
     flex: 1,
     backgroundColor: '#0f172a',
@@ -1117,7 +961,7 @@ const styles = StyleSheet.create({
   },
   scrim: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(5,12,24,0.34)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
   },
 
   // Language toggle
@@ -1158,16 +1002,12 @@ const styles = StyleSheet.create({
     right: 16,
     flexDirection: 'row',
     justifyContent: 'space-around',
-    backgroundColor: 'rgba(8,18,32,0.82)',
-    borderRadius: 16,
+    backgroundColor: C.overlayBg,
+    borderRadius: 14,
     paddingVertical: 10,
     paddingHorizontal: 8,
     borderWidth: 1,
-    borderColor: 'rgba(0,212,255,0.42)',
-    shadowColor: C.accent,
-    shadowOpacity: 0.22,
-    shadowRadius: 12,
-    elevation: 5,
+    borderColor: C.border,
   },
   metricTile: { alignItems: 'center' },
   metricLabel: { color: C.textSecondary, fontSize: 10, fontWeight: '600', textTransform: 'uppercase' },
@@ -1185,10 +1025,10 @@ const styles = StyleSheet.create({
   badge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(8,18,32,0.78)',
+    backgroundColor: C.overlayBg,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 12,
+    borderRadius: 20,
     borderWidth: 1,
   },
   badgeText: { fontSize: 11, fontWeight: '700', marginRight: 6 },
@@ -1206,16 +1046,12 @@ const styles = StyleSheet.create({
   },
   toolbarBtn: {
     flex: 1,
-    backgroundColor: 'rgba(10,20,34,0.84)',
+    backgroundColor: C.overlayBg,
     paddingVertical: 14,
-    borderRadius: 10,
+    borderRadius: 12,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: 'rgba(0,212,255,0.3)',
-    shadowColor: '#00D4FF',
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 3,
+    borderColor: C.border,
   },
   toolbarBtnDanger: { borderColor: C.dangerDark, backgroundColor: 'rgba(139,0,0,0.4)' },
   toolbarBtnText: { color: C.text, fontSize: 13, fontWeight: '600' },
