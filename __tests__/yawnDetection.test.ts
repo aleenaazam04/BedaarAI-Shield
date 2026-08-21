@@ -55,4 +55,19 @@ describe('yawn rising-edge detection', () => {
     }
     expect(getYawnCount()).toBe(3);
   });
+
+  it('raises the oxygen alert once per yawn, not every frame', async () => {
+    await calibrate();
+    let base = T0 + 100;
+    for (let c = 0; c < 4; c++) {
+      await frame(0.9, base++);
+      await frame(0.0, base++);
+    }
+    let alertFrames = 0;
+    for (let i = 0; i < 30; i++) {
+      const r = await frame(0.9, base++);
+      if (r.alerts.includes('oxygen_deficiency')) alertFrames++;
+    }
+    expect(alertFrames).toBeLessThanOrEqual(1);
+  });
 });
