@@ -56,28 +56,58 @@ __tests__/App.test.tsx          Render smoke test
 
 ## Getting started
 
-> Complete the [React Native environment setup](https://reactnative.dev/docs/environment-setup) first (Android SDK / Xcode).
+### Prerequisites
+
+- **Node.js ≥ 18** and npm
+- **JDK 17+** and the **Android SDK** (via Android Studio) for Android
+- **Xcode + CocoaPods** for iOS (macOS only)
+- A **physical device** is strongly recommended — the camera, accelerometer, and GPS features don't work on emulators/simulators
+- Complete the [React Native environment setup](https://reactnative.dev/docs/set-up-your-environment) for your platform first
+
+### Run it
 
 ```bash
-# 1. Install dependencies
+# 1. Clone and enter the project
+git clone https://github.com/aleenaazam04/BedaarAI-Shield.git
+cd BedaarAI-Shield
+
+# 2. Install JS dependencies
 npm install
 
-# 2. iOS only — install pods
+# 3. iOS only — install native pods
 cd ios && pod install && cd ..
 
-# 3. Start Metro
+# 4. Start the Metro bundler (leave this running in its own terminal)
 npm start
 
-# 4. In a second terminal, build & run
-npm run android
-# or
-npm run ios
+# 5. In a SECOND terminal, build and launch on a connected device/emulator
+npm run android      # Android
+npm run ios          # iOS
 ```
 
-The app requests **camera**, **location**, and (for the emergency protocol) **SMS/phone** permissions. On first launch you'll pick a language and complete the driver-profile onboarding.
+**Android device checklist:** enable *Developer Options → USB debugging*, connect via USB, and confirm the device shows up with `adb devices` before running `npm run android`.
+
+On first launch the app will:
+1. Ask you to **pick a language** (English / Urdu).
+2. Request **camera**, **location**, and **SMS/phone** permissions — grant them for full functionality.
+3. Walk you through **driver-profile onboarding** (name, blood group, 11-digit guardian phone).
+
+### Verify without a device
+
+```bash
+npm test              # Jest render + logic tests
+npx tsc --noEmit      # TypeScript type-check
+npm run lint          # ESLint
+```
 
 ### Testing the crash flow
 Use the **Test Crash** button on the dashboard to trigger the emergency countdown without an actual impact.
+
+### Troubleshooting
+
+- **Metro cache issues:** `npm start -- --reset-cache`
+- **Android build fails / stale native state:** `cd android && ./gradlew clean && cd ..`
+- **Black screen on launch:** check `npx react-native log-android` (or `log-ios`) — a global error handler logs unhandled JS crashes there.
 
 ---
 
