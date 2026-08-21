@@ -88,6 +88,7 @@ npm run ios          # iOS
 **Android device checklist:** enable *Developer Options → USB debugging*, connect via USB, and confirm the device shows up with `adb devices` before running `npm run android`.
 
 On first launch the app will:
+
 1. Ask you to **pick a language** (English / Urdu).
 2. Request **camera**, **location**, and **SMS/phone** permissions — grant them for full functionality.
 3. Walk you through **driver-profile onboarding** (name, blood group, 11-digit guardian phone).
@@ -101,6 +102,7 @@ npm run lint          # ESLint
 ```
 
 ### Testing the crash flow
+
 Use the **Test Crash** button on the dashboard to trigger the emergency countdown without an actual impact.
 
 ### Troubleshooting
