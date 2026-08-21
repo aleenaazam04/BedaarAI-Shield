@@ -701,7 +701,7 @@ export async function processFrame(frame: FrameInput): Promise<FrameResult> {
   // Prune timestamps outside the 60-second rolling window
   yawnTimestamps = yawnTimestamps.filter((t) => now - t < YAWN_WINDOW_MS);
 
-  if (yawnTimestamps.length > YAWN_ALERT_COUNT) {
+  if (yawning && yawnTimestamps.length > YAWN_ALERT_COUNT) {
     alerts.push('oxygen_deficiency');
     await logIncident('yawning', {
       reason: `MAR=${mar.toFixed(3)} > ${yawnThreshold.toFixed(3)} — ${yawnTimestamps.length} yawns in ${YAWN_WINDOW_MS / 1000}s window (Murree Protocol)`,
