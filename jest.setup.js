@@ -16,10 +16,22 @@ jest.mock('react-native-worklets-core', () => ({
   Worklets: { createRunOnJS: (fn) => Object.assign((...a) => Promise.resolve(fn(...a)), { finally: () => {} }) },
 }));
 
-jest.mock('react-native-sensors', () => ({
-  accelerometer: { subscribe: jest.fn(() => ({ unsubscribe: jest.fn() })) },
-  setUpdateIntervalForType: jest.fn(),
-}));
+jest.mock('react-native-sensors', () => {
+  const listeners = [];
+  global.__emitAccel = (sample) => listeners.forEach((cb) => cb(sample));
+  return {
+    accelerometer: {
+      subscribe: jest.fn((cb) => {
+        listeners.push(cb);
+        return { unsubscribe: jest.fn(() => {
+          const i = listeners.indexOf(cb);
+          if (i >= 0) listeners.splice(i, 1);
+        }) };
+      }),
+    },
+    setUpdateIntervalForType: jest.fn(),
+  };
+});
 
 jest.mock('@react-native-community/geolocation', () => ({
   getCurrentPosition: jest.fn(),

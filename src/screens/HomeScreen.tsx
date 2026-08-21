@@ -97,10 +97,11 @@ const BLOOD_GROUPS = [
 // Accelerometer crash-detection constants (Feature 5)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Impact threshold in G-force units. Normal driving ~ 0.5–1.5 G. */
-const CRASH_G_THRESHOLD = 3.0;
+/** Impact threshold as a multiple of the resting gravity baseline. */
+const CRASH_RATIO_THRESHOLD = 2.5;
 
-const GRAVITY_MS2 = 9.81;
+const BASELINE_WARMUP_SAMPLES = 15;
+const BASELINE_EMA_ALPHA = 0.05;
 
 /** Sensor sampling interval in ms (10 Hz). */
 const ACCEL_UPDATE_INTERVAL_MS = 100;
@@ -246,17 +247,36 @@ export default function HomeScreen() {
   const crashCooldownRef = useRef<number>(0);
   const CRASH_COOLDOWN_MS = 5000; // 5-second grace period after cancel
 
+  const gravityBaselineRef = useRef<number>(0);
+  const baselineSamplesRef = useRef<number>(0);
+
   useEffect(() => {
     let sub: Subscription | null = null;
     try {
       setUpdateIntervalForType('accelerometer', ACCEL_UPDATE_INTERVAL_MS);
       sub = accelerometer.subscribe(({ x, y, z }: { x: number; y: number; z: number }) => {
+        const magnitude = Math.sqrt(x * x + y * y + z * z);
+
+        if (baselineSamplesRef.current < BASELINE_WARMUP_SAMPLES) {
+          gravityBaselineRef.current =
+            baselineSamplesRef.current === 0
+              ? magnitude
+              : (gravityBaselineRef.current + magnitude) / 2;
+          baselineSamplesRef.current += 1;
+          return;
+        }
+
         if (Date.now() < crashCooldownRef.current) return;
         if (useSafetyStore.getState().isCrashDetected) return;
 
-        const gForce = Math.sqrt(x * x + y * y + z * z) / GRAVITY_MS2;
-        if (gForce > CRASH_G_THRESHOLD) {
+        const baseline = gravityBaselineRef.current || magnitude;
+        const ratio = magnitude / baseline;
+
+        if (ratio > CRASH_RATIO_THRESHOLD) {
           useSafetyStore.getState().setCrashDetected(true);
+        } else {
+          gravityBaselineRef.current =
+            baseline + BASELINE_EMA_ALPHA * (magnitude - baseline);
         }
       });
     } catch (err) {
