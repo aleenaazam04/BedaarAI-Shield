@@ -98,10 +98,13 @@ const BLOOD_GROUPS = [
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Impact threshold as a multiple of the resting gravity baseline. */
-const CRASH_RATIO_THRESHOLD = 2.5;
+const CRASH_RATIO_THRESHOLD = 4.0;
 
-const BASELINE_WARMUP_SAMPLES = 15;
+const BASELINE_WARMUP_SAMPLES = 20;
 const BASELINE_EMA_ALPHA = 0.05;
+
+/** Consecutive over-threshold samples required to confirm an impact. */
+const CRASH_CONFIRM_SAMPLES = 2;
 
 /** Sensor sampling interval in ms (10 Hz). */
 const ACCEL_UPDATE_INTERVAL_MS = 100;
@@ -249,6 +252,7 @@ export default function HomeScreen() {
 
   const gravityBaselineRef = useRef<number>(0);
   const baselineSamplesRef = useRef<number>(0);
+  const spikeStreakRef = useRef<number>(0);
 
   useEffect(() => {
     let sub: Subscription | null = null;
@@ -273,8 +277,13 @@ export default function HomeScreen() {
         const ratio = magnitude / baseline;
 
         if (ratio > CRASH_RATIO_THRESHOLD) {
-          useSafetyStore.getState().setCrashDetected(true);
+          spikeStreakRef.current += 1;
+          if (spikeStreakRef.current >= CRASH_CONFIRM_SAMPLES) {
+            spikeStreakRef.current = 0;
+            useSafetyStore.getState().setCrashDetected(true);
+          }
         } else {
+          spikeStreakRef.current = 0;
           gravityBaselineRef.current =
             baseline + BASELINE_EMA_ALPHA * (magnitude - baseline);
         }
