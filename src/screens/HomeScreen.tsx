@@ -276,10 +276,17 @@ export default function HomeScreen() {
         const baseline = gravityBaselineRef.current || magnitude;
         const ratio = magnitude / baseline;
 
+        if (ratio > 1.8) {
+          console.log(
+            `[CrashDebug] mag=${magnitude.toFixed(2)} baseline=${baseline.toFixed(2)} ratio=${ratio.toFixed(2)} streak=${spikeStreakRef.current}`,
+          );
+        }
+
         if (ratio > CRASH_RATIO_THRESHOLD) {
           spikeStreakRef.current += 1;
           if (spikeStreakRef.current >= CRASH_CONFIRM_SAMPLES) {
             spikeStreakRef.current = 0;
+            console.log(`[CrashDebug] FIRING crash — mag=${magnitude.toFixed(2)} ratio=${ratio.toFixed(2)}`);
             useSafetyStore.getState().setCrashDetected(true);
           }
         } else {
